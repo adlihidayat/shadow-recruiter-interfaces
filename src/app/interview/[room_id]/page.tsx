@@ -6,7 +6,7 @@ import styles from "./page.module.css";
 export default function InterviewPage({ params }: { params: Promise<{ room_id: string }> }) {
   const { room_id } = use(params);
   const [status, setStatus] = useState<"idle" | "validating" | "ready" | "connecting" | "connected" | "error">("idle");
-  const [agentState, setAgentState] = useState<"listening" | "speaking" | "waiting">("waiting");
+  const [agentState, setAgentState] = useState<"LISTENING" | "PROCESSING" | "AI_SPEAKING" | "IDLE" | "EVAL">("IDLE");
   const [jwt, setJwt] = useState<string | null>(null);
   const [isMicMuted, setIsMicMuted] = useState(false);
 
@@ -14,17 +14,24 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   
   const playbackQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef<boolean>(false);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
+  // VAD state
+  const isSpeakingRef = useRef<boolean>(false);
+  const silenceStartRef = useRef<number>(0);
+  const SILENCE_THRESHOLD = -50; // dB
+  const SILENCE_DURATION = 1500; // ms to trigger SILENCE_DETECTED
+
   useEffect(() => {
-    // Step 1: Validate room and get JWT when user visits page
     const validateRoom = async () => {
       setStatus("validating");
       try {
-        const res = await fetch(`http://localhost:8000/api/v1/interview/${room_id}/validate`);
+        // Updated route to /session/
+        const res = await fetch(`http://localhost:8000/api/v1/session/${room_id}/validate`);
         if (res.ok) {
           const data = await res.json();
           if (data.valid && data.token) {
@@ -76,8 +83,6 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
     if (!audioCtx) return;
 
     isPlayingRef.current = true;
-    setAgentState("speaking");
-
     const chunk = playbackQueueRef.current.shift();
     if (!chunk) {
       isPlayingRef.current = false;
@@ -85,8 +90,6 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
     }
 
     try {
-      // Decode the raw binary chunk. 
-      // Note: This expects complete playable chunks like full wav files or mp3 chunks.
       const audioBuffer = await audioCtx.decodeAudioData(chunk);
       const source = audioCtx.createBufferSource();
       source.buffer = audioBuffer;
@@ -96,14 +99,10 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
       source.onended = () => {
         currentSourceRef.current = null;
         isPlayingRef.current = false;
-        
         if (playbackQueueRef.current.length > 0) {
           playNextInQueue();
-        } else {
-          setAgentState("listening");
         }
       };
-
       source.start(0);
     } catch (err) {
       console.error("Error decoding audio data:", err);
@@ -113,18 +112,13 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
   };
 
   const handleAbortPlayback = () => {
-    // Clear playback queue
     playbackQueueRef.current = [];
-    
-    // Stop current playback
     if (currentSourceRef.current) {
       currentSourceRef.current.onended = null;
       currentSourceRef.current.stop();
       currentSourceRef.current = null;
     }
-    
     isPlayingRef.current = false;
-    setAgentState("listening");
   };
 
   const startInterview = async () => {
@@ -132,102 +126,132 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
     setStatus("connecting");
 
     try {
-      // Setup Audio Context
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      
-      // Request Microphone Permissions
       mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Setup WebSocket
-      const ws = new WebSocket(`ws://localhost:8000/api/v1/interview/${room_id}?token=${jwt}`);
+      // Setup Analyser for VAD
+      const source = audioContextRef.current.createMediaStreamSource(mediaStreamRef.current);
+      analyserRef.current = audioContextRef.current.createAnalyser();
+      analyserRef.current.fftSize = 256;
+      source.connect(analyserRef.current);
+      
+      // Start VAD Loop
+      requestAnimationFrame(vadLoop);
+
+      // Setup WebSocket with session route
+      const ws = new WebSocket(`ws://localhost:8000/api/v1/session/${room_id}?token=${jwt}`);
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
-
-      ws.onopen = () => {
-        console.log("WebSocket connected");
-        // Wait for SESSION_READY before sending audio
-      };
 
       ws.onmessage = async (event) => {
         if (typeof event.data === "string") {
           try {
             const data = JSON.parse(event.data);
-            if (data.type === "SESSION_READY") {
-              setStatus("connected");
-              setAgentState("listening");
-              startRecording();
-            } else if (data.type === "CONTROL" && data.action === "abort_playback") {
-              handleAbortPlayback();
+            
+            // Handle State Broadcasts from Server
+            if (data.type === "STATE_CHANGE") {
+              setAgentState(data.state);
+              if (data.state === "LISTENING") {
+                handleAbortPlayback(); // Just in case
+              }
+            }
+            
+            if (data.type === "CONTROL") {
+              if (data.action === "SESSION_READY") {
+                setStatus("connected");
+                startRecording();
+              } else if (data.action === "TTS_DONE") {
+                // Server tells us AI is done speaking
+              }
             }
           } catch (e) {
-            console.error("Failed to parse WebSocket message:", e);
+            console.error("WS Text Error:", e);
           }
         } else if (event.data instanceof ArrayBuffer) {
-          // Received binary audio chunk from server
           playbackQueueRef.current.push(event.data);
           playNextInQueue();
         }
       };
 
-      ws.onclose = () => {
-        console.log("WebSocket closed");
-        setStatus("error");
-        cleanup();
-      };
-      
-      ws.onerror = (err) => {
-        console.error("WebSocket error:", err);
-        setStatus("error");
-        cleanup();
-      };
+      ws.onclose = () => setStatus("error");
+      ws.onerror = () => setStatus("error");
 
     } catch (err) {
-      console.error("Failed to start interview:", err);
+      console.error("Start Error:", err);
       setStatus("error");
     }
   };
 
+  const vadLoop = () => {
+    if (!analyserRef.current || status !== "connected") {
+      requestAnimationFrame(vadLoop);
+      return;
+    }
+
+    const dataArray = new Float32Array(analyserRef.current.frequencyBinCount);
+    analyserRef.current.getFloatTimeDomainData(dataArray);
+    
+    // Calculate RMS volume
+    let sumSquares = 0.0;
+    for (const amplitude of dataArray) {
+      sumSquares += amplitude * amplitude;
+    }
+    const volume = 20 * Math.log10(Math.sqrt(sumSquares / dataArray.length));
+
+    const isCurrentlySpeaking = volume > SILENCE_THRESHOLD;
+
+    if (isCurrentlySpeaking) {
+      if (!isSpeakingRef.current) {
+        isSpeakingRef.current = true;
+        console.log("Speech Started");
+        // BARGE_IN during AI_SPEAKING or PROCESSING
+        if (agentState === "AI_SPEAKING" || agentState === "PROCESSING") {
+          wsRef.current?.send(JSON.stringify({ type: "BARGE_IN" }));
+          handleAbortPlayback();
+        }
+      }
+      silenceStartRef.current = 0;
+    } else {
+      if (isSpeakingRef.current) {
+        if (silenceStartRef.current === 0) {
+          silenceStartRef.current = Date.now();
+        } else if (Date.now() - silenceStartRef.current > SILENCE_DURATION) {
+          isSpeakingRef.current = false;
+          silenceStartRef.current = 0;
+          console.log("Silence Detected");
+          if (agentState === "LISTENING") {
+            wsRef.current?.send(JSON.stringify({ type: "SILENCE_DETECTED" }));
+          }
+        }
+      }
+    }
+
+    requestAnimationFrame(vadLoop);
+  };
+
   const startRecording = () => {
     if (!mediaStreamRef.current || !wsRef.current) return;
-    
-    // We send audio in small intervals.
-    // Some implementations use MediaRecorder, but sending raw chunks depends on the backend.
-    // The backend uses silero-vad, so WebM/Opus blobs are standard for modern browsers.
-    // If raw PCM is strictly required, AudioWorklet/ScriptProcessor is needed, but MediaRecorder is usually accepted.
-    mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType: 'audio/webm' });
-    
+    mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType: "audio/webm" });
     mediaRecorderRef.current.ondataavailable = (event) => {
       if (event.data.size > 0 && wsRef.current?.readyState === WebSocket.OPEN && !isMicMuted) {
         wsRef.current.send(event.data);
       }
     };
-    
-    // Send chunk every 250ms
     mediaRecorderRef.current.start(250);
   };
 
   const toggleMic = () => {
     setIsMicMuted((prev) => {
       const newState = !prev;
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getAudioTracks().forEach(track => {
-          track.enabled = !newState;
-        });
-      }
+      mediaStreamRef.current?.getAudioTracks().forEach(track => track.enabled = !newState);
       return newState;
     });
-  };
-
-  const endInterview = () => {
-    cleanup();
-    setStatus("idle");
-    setAgentState("waiting");
   };
 
   return (
     <div className={styles.container}>
       <div className={styles.mainArea}>
-        <div className={`${styles.participantBox} ${agentState === 'speaking' ? styles.speaking : ''}`}>
+        <div className={`${styles.participantBox} ${agentState === "AI_SPEAKING" ? styles.speaking : ""}`}>
           <div className={styles.avatar}>🤖</div>
           <div className={styles.nameTag}>AI Recruiter</div>
           <div className={styles.statusTag}>
@@ -260,14 +284,10 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
             <button 
               className={`${styles.micBtn} ${!isMicMuted ? styles.active : ''}`}
               onClick={toggleMic}
-              title={isMicMuted ? "Unmute" : "Mute"}
             >
-              {isMicMuted ? '🔇' : '🎙️'}
+              {isMicMuted ? "🔇" : "🎙️"}
             </button>
-            <button 
-              className={`${styles.btn} ${styles.endBtn}`}
-              onClick={endInterview}
-            >
+            <button className={`${styles.btn} ${styles.endBtn}`} onClick={cleanup}>
               End Call
             </button>
           </>
