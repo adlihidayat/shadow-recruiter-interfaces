@@ -20,18 +20,27 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
   const isPlayingRef = useRef<boolean>(false);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
+  // Mic Test State
+  const [isMicTesting, setIsMicTesting] = useState(false);
+  const [vadActive, setVadActive] = useState(false);
+  const micTestStreamRef = useRef<MediaStream | null>(null);
+  const micTestAudioContextRef = useRef<AudioContext | null>(null);
+  const micTestAnalyserRef = useRef<AnalyserNode | null>(null);
+  const micTestLoopIdRef = useRef<number>(0);
+  const lastVadLogRef = useRef<boolean | null>(null);
+
   // VAD state
   const isSpeakingRef = useRef<boolean>(false);
   const silenceStartRef = useRef<number>(0);
-  const SILENCE_THRESHOLD = -50; // dB
-  const SILENCE_DURATION = 1500; // ms to trigger SILENCE_DETECTED
+  const SILENCE_THRESHOLD = -35; // dB
+  const SILENCE_DURATION = 2000; // ms to trigger SILENCE_DETECTED
 
   useEffect(() => {
     const validateRoom = async () => {
       setStatus("validating");
       try {
         // Updated route to /session/
-        const res = await fetch(`http://localhost:8001/api/v1/session/${room_id}/validate`);
+        const res = await fetch(`/api/v1/session/${room_id}/validate`);
         if (res.ok) {
           const data = await res.json();
           if (data.valid && data.token) {
@@ -74,6 +83,17 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
+    
+    // Cleanup Mic Test
+    if (micTestStreamRef.current) {
+      micTestStreamRef.current.getTracks().forEach(track => track.stop());
+      micTestStreamRef.current = null;
+    }
+    if (micTestAudioContextRef.current) {
+      micTestAudioContextRef.current.close();
+      micTestAudioContextRef.current = null;
+    }
+    cancelAnimationFrame(micTestLoopIdRef.current);
   };
 
   const playNextInQueue = async () => {
@@ -121,6 +141,67 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
     isPlayingRef.current = false;
   };
 
+  const startMicTest = async () => {
+    setIsMicTesting(true);
+    setVadActive(false);
+    lastVadLogRef.current = null;
+    
+    try {
+      micTestAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      micTestStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      const source = micTestAudioContextRef.current.createMediaStreamSource(micTestStreamRef.current);
+      micTestAnalyserRef.current = micTestAudioContextRef.current.createAnalyser();
+      micTestAnalyserRef.current.fftSize = 256;
+      source.connect(micTestAnalyserRef.current);
+      
+      const testLoop = () => {
+        if (!micTestAnalyserRef.current) return;
+
+        const dataArray = new Float32Array(micTestAnalyserRef.current.frequencyBinCount);
+        micTestAnalyserRef.current.getFloatTimeDomainData(dataArray);
+        
+        let sumSquares = 0.0;
+        for (const amplitude of dataArray) {
+          sumSquares += amplitude * amplitude;
+        }
+        const volume = 20 * Math.log10(Math.sqrt(sumSquares / dataArray.length));
+        const isActive = volume > SILENCE_THRESHOLD;
+        
+        setVadActive(isActive);
+        
+        if (lastVadLogRef.current !== isActive) {
+          console.log(`VAD active: ${isActive ? 'yes' : 'no'}`);
+          lastVadLogRef.current = isActive;
+        }
+
+        micTestLoopIdRef.current = requestAnimationFrame(testLoop);
+      };
+      
+      testLoop();
+    } catch (err) {
+      console.error("Mic test error:", err);
+      setIsMicTesting(false);
+    }
+  };
+
+  const stopMicTest = () => {
+    setIsMicTesting(false);
+    setVadActive(false);
+    lastVadLogRef.current = null;
+    
+    if (micTestStreamRef.current) {
+      micTestStreamRef.current.getTracks().forEach(track => track.stop());
+      micTestStreamRef.current = null;
+    }
+    if (micTestAudioContextRef.current) {
+      micTestAudioContextRef.current.close();
+      micTestAudioContextRef.current = null;
+    }
+    cancelAnimationFrame(micTestLoopIdRef.current);
+    micTestAnalyserRef.current = null;
+  };
+
   const startInterview = async () => {
     if (!jwt) return;
     setStatus("connecting");
@@ -139,7 +220,9 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
       requestAnimationFrame(vadLoop);
 
       // Setup WebSocket with session route
-      const ws = new WebSocket(`ws://localhost:8001/api/v1/session/${room_id}?token=${jwt}`);
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${protocol}//${window.location.host}/api/v1/session/${room_id}?token=${jwt}`;
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
 
@@ -262,15 +345,35 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
       
       <div className={styles.controls}>
         {status !== "connected" && status !== "connecting" && (
-          <button 
-            className={`${styles.btn} ${styles.startBtn}`}
-            onClick={startInterview}
-            disabled={status !== "ready"}
-          >
-            {status === "validating" ? "Validating Room..." : 
-             status === "idle" ? "Waiting..." : 
-             status === "error" ? "Connection Error" : "Start Interview"}
-          </button>
+          <div style={{ display: 'flex', gap: '15px' }}>
+            <button 
+              className={`${styles.btn} ${styles.startBtn}`}
+              onClick={startInterview}
+              disabled={status !== "ready" || isMicTesting}
+            >
+              {status === "validating" ? "Validating Room..." : 
+               status === "idle" ? "Waiting..." : 
+               status === "error" ? "Connection Error" : "Start Interview"}
+            </button>
+            
+            {!isMicTesting ? (
+              <button 
+                className={`${styles.btn}`} 
+                style={{ backgroundColor: '#6c757d', color: 'white' }} 
+                onClick={startMicTest}
+              >
+                Test Mic
+              </button>
+            ) : (
+              <button 
+                className={`${styles.btn}`} 
+                style={{ backgroundColor: '#ffc107', color: 'black' }} 
+                onClick={stopMicTest}
+              >
+                Stop Test (VAD: {vadActive ? 'Active' : 'Inactive'})
+              </button>
+            )}
+          </div>
         )}
 
         {status === "connecting" && (
