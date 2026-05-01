@@ -1,0 +1,132 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: #1a1a1a;
+  color: #ffffff;
+  font-family: 'Inter', sans-serif;
+  overflow: hidden;
+}
+
+.mainArea {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  position: relative;
+}
+
+.participantBox {
+  width: 300px;
+  height: 300px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #2a2a2a, #1a1a1a);
+  box-shadow: 20px 20px 60px #161616, -20px -20px 60px #1e1e1e;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  position: relative;
+  transition: all 0.3s ease;
+}
+
+.participantBox.speaking {
+  box-shadow: 0 0 40px rgba(0, 153, 255, 0.4);
+  border: 2px solid rgba(0, 153, 255, 0.8);
+}
+
+.avatar {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background-color: #4a4a4a;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 48px;
+  margin-bottom: 20px;
+}
+
+.nameTag {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.statusTag {
+  font-size: 14px;
+  color: #888;
+  margin-top: 8px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+.controls {
+  height: 80px;
+  background-color: #222222;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+}
+
+.btn {
+  padding: 12px 24px;
+  border-radius: 8px;
+  border: none;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.startBtn {
+  background-color: #007bff;
+  color: white;
+}
+
+.startBtn:hover {
+  background-color: #0056b3;
+}
+
+.startBtn:disabled {
+  background-color: #444;
+  color: #888;
+  cursor: not-allowed;
+}
+
+.endBtn {
+  background-color: #dc3545;
+  color: white;
+}
+
+.endBtn:hover {
+  background-color: #a71d2a;
+}
+
+.micBtn {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background-color: #444;
+  color: white;
+  border: none;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.micBtn.active {
+  background-color: #007bff;
+}
+
+.micBtn:hover {
+  background-color: #555;
+}
+
+.micBtn.active:hover {
+  background-color: #0056b3;
+}
