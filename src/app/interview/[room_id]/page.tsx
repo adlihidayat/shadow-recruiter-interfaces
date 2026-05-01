@@ -31,7 +31,7 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
       setStatus("validating");
       try {
         // Updated route to /session/
-        const res = await fetch(`http://localhost:8000/api/v1/session/${room_id}/validate`);
+        const res = await fetch(`http://localhost:8001/api/v1/session/${room_id}/validate`);
         if (res.ok) {
           const data = await res.json();
           if (data.valid && data.token) {
@@ -139,7 +139,7 @@ export default function InterviewPage({ params }: { params: Promise<{ room_id: s
       requestAnimationFrame(vadLoop);
 
       // Setup WebSocket with session route
-      const ws = new WebSocket(`ws://localhost:8000/api/v1/session/${room_id}?token=${jwt}`);
+      const ws = new WebSocket(`ws://localhost:8001/api/v1/session/${room_id}?token=${jwt}`);
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
 
